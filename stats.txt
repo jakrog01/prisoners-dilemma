@@ -1,0 +1,4 @@
+T_FACTOR: 1.9
+MEAN: 0.305800
+STD: 0.000000
+DATA: [np.float64(0.3058)]

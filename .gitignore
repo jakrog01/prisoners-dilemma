@@ -1,2 +1,5 @@
 *.gif
 *.png
+*.sbatch
+*.sh
+output/

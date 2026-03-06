@@ -1,0 +1,232 @@
+import matplotlib
+
+matplotlib.use("Agg")
+import os
+
+import matplotlib.animation as animation
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy import ndimage
+from scipy.signal import convolve2d
+
+COOP = 0
+DEFECT = 1
+
+
+class SpatialPD:
+    def __init__(
+        self, grid_size=100, t_factor=1.6, density=0.5, deg_rate=0.01, reg_rate=0.01
+    ):
+        self.grid_size = grid_size
+        self.t_factor = t_factor
+        self.density = density
+        self.deg_rate = deg_rate
+        self.reg_rate = reg_rate
+
+        self.env_grid = np.ones((grid_size, grid_size), dtype=float)
+        self.evolution = {"coop": [], "defect": [], "avg_env": []}
+
+        self._initialize_grids()
+        self._add_to_evolution()
+
+    def run_simulation(
+        self,
+        steps=100,
+        make_gif=False,
+        gif_filename="evolution.gif",
+        gif_frames=50,
+        make_summary=False,
+        summary_filename="summary.png",
+    ):
+        snapshots = []
+        snapshot_interval = max(1, steps // max(1, gif_frames))
+
+        for i in range(steps):
+            self._step(make_gif, snapshots, snapshot_interval, i)
+
+        if make_gif:
+            self._save_gif_from_snapshots(snapshots, gif_filename)
+
+        if make_summary:
+            self._plot_results(summary_filename)
+
+    def _save_gif_from_snapshots(self, snapshots, filename):
+        fig, ax = plt.subplots(figsize=(6, 6))
+        cmap = mcolors.ListedColormap(["blue", "red", "lightgrey"])
+        bounds = [-0.5, 0.5, 1.5, 2.5]
+        norm = mcolors.BoundaryNorm(bounds, cmap.N)
+        ax.axis("off")
+        artists = []
+        for grid, step_num in snapshots:
+            img = ax.imshow(grid, cmap=cmap, norm=norm, interpolation="nearest")
+            txt = ax.text(
+                0.5, 1.01, f"Step: {step_num}", transform=ax.transAxes, ha="center"
+            )
+            artists.append([img, txt])
+        anim = animation.ArtistAnimation(fig, artists, interval=100, blit=False)
+        anim.save(filename, writer="pillow", fps=15)
+        plt.close(fig)
+
+    def _count_neighbors(self):
+        coop_mask = self.grid == COOP
+        defect_mask = self.grid == DEFECT
+        num_coop_neighbors = convolve2d(
+            coop_mask.astype(int), self.computation_kernel, mode="same", boundary="wrap"
+        )
+        num_defect_neighbors = convolve2d(
+            defect_mask.astype(int),
+            self.computation_kernel,
+            mode="same",
+            boundary="wrap",
+        )
+        return num_coop_neighbors, num_defect_neighbors, coop_mask, defect_mask
+
+    def _initialize_grids(self):
+        probs = [self.density, 1 - self.density]
+        self.grid = np.random.choice(
+            [COOP, DEFECT], size=(self.grid_size, self.grid_size), p=probs
+        )
+        self.payoff_grid = np.zeros((self.grid_size, self.grid_size), dtype=float)
+        self.computation_kernel = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]])
+
+    def _update_strategies(self):
+        p_coop = np.where(self.grid == COOP, self.payoff_grid, -np.inf)
+        p_defect = np.where(self.grid == DEFECT, self.payoff_grid, -np.inf)
+        max_coop_neigh = ndimage.maximum_filter(p_coop, size=3, mode="wrap")
+        max_defect_neigh = ndimage.maximum_filter(p_defect, size=3, mode="wrap")
+        next_grid = self.grid.copy()
+        mask_c_to_d = (self.grid == COOP) & (max_defect_neigh > max_coop_neigh)
+        next_grid[mask_c_to_d] = DEFECT
+        mask_d_to_c = (self.grid == DEFECT) & (max_coop_neigh > max_defect_neigh)
+        next_grid[mask_d_to_c] = COOP
+        self.grid = next_grid
+
+    def _update_environment(self):
+        self.env_grid[self.grid == DEFECT] -= self.deg_rate
+        self.env_grid[self.grid == COOP] += self.reg_rate
+        self.env_grid = np.clip(self.env_grid, 0.0, 1.0)
+
+    def _compute_payoffs(self):
+        num_coop_neighbors, _, coop_mask, defect_mask = self._count_neighbors()
+        self.payoff_grid[:] = 0
+        self.payoff_grid[coop_mask] = (
+            num_coop_neighbors[coop_mask] * 1.0 * self.env_grid[coop_mask]
+        )
+        self.payoff_grid[defect_mask] = (
+            num_coop_neighbors[defect_mask] * self.t_factor * self.env_grid[defect_mask]
+        )
+
+    def _add_to_evolution(self):
+        unique, counts = np.unique(self.grid, return_counts=True)
+        data = dict(zip(unique, counts))
+        total = self.grid_size**2
+        self.evolution["coop"].append(data.get(COOP, 0) / total)
+        self.evolution["defect"].append(data.get(DEFECT, 0) / total)
+        self.evolution["avg_env"].append(np.mean(self.env_grid))
+
+    def _step(self, make_gif, snapshots, snapshot_interval, i):
+        self._compute_payoffs()
+        self._update_strategies()
+        self._update_environment()
+        self._add_to_evolution()
+        if make_gif and i % snapshot_interval == 0:
+            snapshots.append((self.grid.copy(), i))
+
+    def _plot_results(self, filename):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        cmap = mcolors.ListedColormap(["blue", "red", "lightgrey"])
+        bounds = [-0.5, 0.5, 1.5, 2.5]
+        norm = mcolors.BoundaryNorm(bounds, cmap.N)
+        ax1.imshow(self.grid, cmap=cmap, norm=norm, interpolation="nearest")
+        ax1.set_title(f"Stan końcowy (b={self.t_factor:.2f})")
+        ax1.axis("off")
+        t = range(len(self.evolution["coop"]))
+        ax2.set_title("Ewolucja strategii i środowiska")
+        ln1 = ax2.plot(t, self.evolution["coop"], label="Kooperanci", color="blue")
+        ln2 = ax2.plot(t, self.evolution["defect"], label="Zdrajcy", color="red")
+        ax2.set_xlabel("Kroki symulacji")
+        ax2.set_ylabel("Frakcja populacji")
+        ax2.set_ylim(-0.02, 1.02)
+        ax2.grid(True, alpha=0.3)
+        ax3 = ax2.twinx()
+        ln3 = ax3.plot(
+            t,
+            self.evolution["avg_env"],
+            label="Śr. Zasoby",
+            color="black",
+            linestyle="--",
+            linewidth=2,
+        )
+        ax3.set_ylabel("Jakość środowiska (0-1)")
+        ax3.set_ylim(0, 1.1)
+        lns = ln1 + ln2 + ln3
+        labs = [l.get_label() for l in lns]
+        ax2.legend(lns, labs, loc="center right")
+        plt.tight_layout()
+        plt.savefig(filename)
+        plt.close(fig)
+
+    def get_coop_ratio(self):
+        return np.sum(self.grid == COOP) / (self.grid_size**2)
+
+
+if __name__ == "__main__":
+    try:
+        t_fac = float(os.environ.get("B_FACTOR_VALUE", "2.165"))
+        reg_val = float(os.environ.get("REG_RATE_VALUE", "0.01"))
+        n_runs = int(os.environ.get("N_RUNS", "1"))
+        output_dir = os.environ.get("OUTPUT_DIR", ".")
+
+        deg_val = float(os.environ.get("DEG_RATE_VALUE", "0.1"))
+    except (TypeError, ValueError):
+        t_fac = 2.165
+        reg_val = 0.02
+        n_runs = 1
+        output_dir = "."
+        deg_val = 0.1
+
+
+    results_c = []
+    results_env = []
+
+    for run_idx in range(n_runs):
+        sim = SpatialPD(
+            grid_size=100,
+            t_factor=t_fac,
+            density=0.5,
+            reg_rate=reg_val,
+            deg_rate=deg_val,
+        )
+        is_first = run_idx == 0
+
+        sim.run_simulation(
+            steps=1000,
+            make_gif=is_first,
+            gif_filename=os.path.join(output_dir, "vis.gif"),
+            gif_frames=60,
+            make_summary=is_first,
+            summary_filename=os.path.join(output_dir, "summary.png"),
+        )
+
+        results_c.append(sim.get_coop_ratio())
+
+        final_avg_env = np.mean(sim.evolution["avg_env"][-50:])
+        results_env.append(final_avg_env)
+
+        if is_first:
+            print(f"Sample Run: Coop={results_c[-1]:.2f}, Env={results_env[-1]:.2f}")
+
+    mean_c = np.mean(results_c)
+    std_c = np.std(results_c)
+
+    mean_env = np.mean(results_env)
+    std_env = np.std(results_env)
+
+    with open(os.path.join(output_dir, "stats.txt"), "w") as f:
+        f.write(f"T_FACTOR: {t_fac}\n")
+        f.write(f"REG_RATE: {reg_val}\n")
+        f.write(f"MEAN_COOP: {mean_c:.6f}\n")
+        f.write(f"STD_COOP: {std_c:.6f}\n")
+        f.write(f"MEAN_ENV: {mean_env:.6f}\n")
+        f.write(f"STD_ENV: {std_env:.6f}\n")
